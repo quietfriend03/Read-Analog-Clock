@@ -1,66 +1,124 @@
 import cv2
 import numpy as np
-from matplotlib import pyplot as plt
+from skimage.morphology import skeletonize
 
+def euclidean_distance(line1, line2):
+    midpoint1 = [(line1[0][0] + line1[0][2]) / 2, (line1[0][1] + line1[0][3]) / 2]
+    midpoint2 = [(line2[0][0] + line2[0][2]) / 2, (line2[0][1] + line2[0][3]) / 2]
+    return np.linalg.norm(np.array(midpoint1) - np.array(midpoint2))
 
-kernel = np.ones((5,5),np.uint8)
-img1 = cv2.imread('clock_image1.jpg')
-img = cv2.imread('clock_image1.jpg',0)
-gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+def angle_between_lines(line1, line2):
+    angle1 = np.arctan2(line1[0][3] - line1[0][1], line1[0][2] - line1[0][0])
+    angle2 = np.arctan2(line2[0][3] - line2[0][1], line2[0][2] - line2[0][0])
+    return np.abs(angle1 - angle2) * (180 / np.pi)
 
-ret, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY)
+def merge_close_hough_lines(lines, distance_threshold, angle_threshold):
+    merged_lines = []
 
-# Create mask
-height,width = img.shape
-mask = np.zeros((height,width), np.uint8)
-edges = cv2.Canny(thresh, 100, 200)
+    while len(lines) > 0:
+        current_line = lines[0]
+        group = [current_line]
 
-#cv2.imshow('detected ',gray)
-cimg=cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1.2, 100)
-for i in circles[0,:]:
-    i[2]=i[2]+4
-    # Draw on mask
-    cv2.circle(mask,(i[0],i[1]),i[2],(255,255,255),thickness=-1)
+        i = 0
+        while i < len(lines):
+            distance = euclidean_distance(current_line, lines[i])
+            angle_diff = angle_between_lines(current_line, lines[i])
+            # print("Distance",distance)
+            # print("Angle",angle_diff)
+            if (distance < distance_threshold) and (angle_diff < angle_threshold):
+                group.append(lines[i])
+                lines = np.delete(lines, i, axis=0)
+            else:
+                i += 1
 
-# Copy that image using that mask
-masked_data = cv2.bitwise_and(img1, img1, mask=mask)
+        # Merge lines in the group
+        if len(group) > 1:
+            merged_line = np.mean(np.array(group), axis=0).astype(int)
+            merged_lines.append(merged_line.tolist())
+        else:
+            merged_lines.append(group[0][0].tolist())
 
-# Apply Threshold
-_,thresh = cv2.threshold(mask,1,255,cv2.THRESH_BINARY)
-# Find Contour
-contours, hierarchy = cv2.findContours(thresh,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-x,y,w,h = cv2.boundingRect(contours[0])
+    return merged_lines
 
-# Crop masked_data
-crop = masked_data[y+30:y+h-30,x+30:x+w-30]
+def find_intersection(line1, line2):
+    x1, y1, x2, y2 = line1[0]
+    x3, y3, x4, y4 = line2[0]
 
+    # Check if the lines are parallel
+    det = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if det == 0:
+        return None  # Lines are parallel, no intersection
 
-################################
-kernel_size = 5
-blur_crop = cv2.GaussianBlur(crop,(kernel_size, kernel_size),0)
-low_threshold = 50
-high_threshold = 150
-edges = cv2.Canny(blur_crop, low_threshold, high_threshold)
+    # Calculate the intersection point
+    intersection_x = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / det
+    intersection_y = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / det
 
-rho = 1                     # distance resolution in pixels
-theta = np.pi / 180         # angular resolution in radians
-threshold = 15              # minimum number of votes 
-min_line_length = 100       # minimum number of pixels making up a line
-max_line_gap = 10           # maximum gap in pixels between connectable 
-line_image = np.copy(crop) * 0 
+    return [int(intersection_x), int(intersection_y)]
+    
+# Read image
+img = cv2.imread('clock_image3.jpg')
+hh, ww = img.shape[:2]
 
-# Run Hough on edge detected image
-# Output "lines" is an array containing endpoints of detected line
-lines = cv2.HoughLinesP(edges, rho, theta, threshold, np.array([]),
-                    min_line_length, max_line_gap)
+# convert to gray
+gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
 
-for line in lines:
-    for x1,y1,x2,y2 in line:
-        cv2.line(line_image,(x1,y1),(x2,y2),(255,0,0),5)
+# threshold
+thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)[1]
 
-# Draw the lines on the  image
-lines_edges = cv2.addWeighted(crop, 0.8, line_image, 1, 0)
+# invert so shapes are white on black background
+thresh = 255 - thresh
 
-cv2.imshow('line_image', line_image)
-cv2.imshow('crop', crop)
+# get contours and save area
+cntrs_info = []
+contours = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+contours = contours[0] if len(contours) == 2 else contours[1]
+index=0
+for cntr in contours:
+    area = cv2.contourArea(cntr)
+    cntrs_info.append((index,area))
+    index = index + 1
+
+# sort contours by area
+def takeSecond(elem):
+    return elem[1]
+cntrs_info.sort(key=takeSecond, reverse=True)
+
+# get third largest contour
+arms = np.zeros_like(thresh)
+index_third = cntrs_info[2][0]
+cv2.drawContours(arms,[contours[index_third]],0,(1),-1)
+
+arms_thin = skeletonize(arms)
+arms_thin = (255*arms_thin).clip(0,255).astype(np.uint8)
+
+# get hough lines and draw on copy of input
+result = img.copy()
+lineThresh = 37
+minLineLength = 55
+maxLineGap = 100
+lines = cv2.HoughLinesP(arms_thin, 1, np.pi/180, lineThresh, None, minLineLength, maxLineGap)
+merged_lines = merge_close_hough_lines(lines, 80, 0.5)
+# merged_lines = merge_close_hough_lines(merged_lines, 85, 0.5)
+print(merged_lines)
+
+if merged_lines is not None:
+    # Sort merged lines by length
+    merged_lines.sort(key=lambda x: np.linalg.norm(np.array([x[0][0], x[0][1]]) - np.array([x[0][2], x[0][3]])),
+                      reverse=True)
+
+    # Assign labels to lines
+    labels = ["second", "minute", "hour"]
+    labeled_lines = dict(zip(labels, merged_lines))
+
+    # Draw the clock hands and label them by length
+    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255)]
+    for label, l in labeled_lines.items():
+        color = colors[labels.index(label)]
+        cv2.line(result, (l[0][0], l[0][1]), (l[0][2], l[0][3]), color, 3, cv2.LINE_AA)
+        cv2.putText(result, label, (l[0][2], l[0][3]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    cv2.imshow('result', result)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+else:
+    print("Not enough lines found to determine clock hands.")
